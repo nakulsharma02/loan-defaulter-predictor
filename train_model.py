@@ -1,73 +1,72 @@
 """
-Run this script ONCE to train the model and save it.
-Usage: python train_model.py
-Requires: credit_risk_dataset.csv in the same folder
-"""
+Run this script to train the model and save it.
 
-import numpy as np
-import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, confusion_matrix
-import joblib
+Usage:
+    python train_model.py
+    LOAN_CSV_PATH=/path/to/credit_risk_dataset.csv python train_model.py
+
+Looks for credit_risk_dataset.csv next to this script unless LOAN_CSV_PATH is set.
+Creates model.pkl and scaler.pkl (both are loaded by main.py).
+"""
 import os
 
-# ── Load data ──────────────────────────────────────────────────────────────────
-CSV_PATH = os.path.join(r"C:\Users\hp\Downloads", "credit_risk_dataset.csv")
+import joblib
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+from features import EDU_MAP, FEATURE_COLS
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH = os.environ.get("LOAN_CSV_PATH", os.path.join(BASE_DIR, "credit_risk_dataset.csv"))
 
 if not os.path.exists(CSV_PATH):
     raise FileNotFoundError(
         f"Dataset not found at {CSV_PATH}.\n"
-        "Please place 'credit_risk_dataset.csv' in the same directory as this script."
+        "Place 'credit_risk_dataset.csv' next to train_model.py or set LOAN_CSV_PATH."
     )
 
 df = pd.read_csv(CSV_PATH)
 print(f"Loaded dataset: {df.shape[0]} rows, {df.shape[1]} columns")
 
-# ── Preprocessing ──────────────────────────────────────────────────────────────
-# Fill missing Income
-df["Income"] = df["Income"].fillna(df["Income"].mean())
-
-# Encode Education_Level
-edu_order = {"High School": 0, "Bachelors": 1, "Masters": 2, "PhD": 3}
-df["Education_Level"] = df["Education_Level"].map(edu_order)
-
-# One-hot encode Housing_Status (drop_first keeps Own as baseline)
+# ── Encoding (no statistics are learned here, so it is safe before the split) ──
+df["Education_Level"] = df["Education_Level"].map(EDU_MAP)
+# drop_first removes the alphabetically first category, which is Mortgage.
 df = pd.get_dummies(df, columns=["Housing_Status"], drop_first=True, dtype=int)
 
-FEATURE_COLS = [
-    "Age", "Income", "Loan_Amount", "Credit_Score",
-    "Employment_Years", "Education_Level",
-    "Housing_Status_Own", "Housing_Status_Rent",
-]
-
-X = df[FEATURE_COLS]
+X = df[FEATURE_COLS].copy()
 y = df["Default"]
 
-# ── Scale ──────────────────────────────────────────────────────────────────────
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-# ── Train / Test split ─────────────────────────────────────────────────────────
+# ── Split first, so test rows never influence imputation or scaling ───────────
 X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y, test_size=0.2, random_state=10
+    X, y, test_size=0.2, stratify=y, random_state=10
 )
 
-# ── Train Logistic Regression ──────────────────────────────────────────────────
-lr = LogisticRegression(max_iter=1000, class_weight="balanced")
-lr.fit(X_train, y_train)
+# Fill missing Income using the TRAINING mean only.
+income_mean = X_train["Income"].mean()
+X_train["Income"] = X_train["Income"].fillna(income_mean)
+X_test["Income"] = X_test["Income"].fillna(income_mean)
 
-# ── Evaluate ───────────────────────────────────────────────────────────────────
-y_pred = lr.predict(X_test)
-print("\nModel Performance:")
-print(f"Accuracy : {lr.score(X_test, y_test):.4f}")
+scaler = StandardScaler()
+X_train_s = scaler.fit_transform(X_train)
+X_test_s = scaler.transform(X_test)
+
+# ── Train ─────────────────────────────────────────────────────────────────────
+lr = LogisticRegression(max_iter=1000, class_weight="balanced")
+lr.fit(X_train_s, y_train)
+
+# ── Evaluate ──────────────────────────────────────────────────────────────────
+y_pred = lr.predict(X_test_s)
+print(f"\nAccuracy : {lr.score(X_test_s, y_test):.4f}")
+print(f"ROC-AUC  : {roc_auc_score(y_test, lr.predict_proba(X_test_s)[:, 1]):.4f}")
 print("\nConfusion Matrix:")
 print(confusion_matrix(y_test, y_pred))
 print("\nClassification Report:")
 print(classification_report(y_test, y_pred))
 
-# ── Save artifacts ─────────────────────────────────────────────────────────────
-joblib.dump(lr, os.path.join(os.path.dirname(__file__), "model.pkl"))
-joblib.dump(scaler, os.path.join(os.path.dirname(__file__), "scaler.pkl"))
-print("\n✅  Saved model.pkl and scaler.pkl")
+# ── Save ──────────────────────────────────────────────────────────────────────
+joblib.dump(lr, os.path.join(BASE_DIR, "model.pkl"))
+joblib.dump(scaler, os.path.join(BASE_DIR, "scaler.pkl"))
+print("\nSaved model.pkl and scaler.pkl")
